@@ -1,5 +1,5 @@
 import dotenv from "dotenv";
-dotenv.config({quiet: true});
+dotenv.config({ quiet: true });
 
 export const ENV = {
     PORT: process.env.PORT,
@@ -9,5 +9,6 @@ export const ENV = {
     CLIENT_SECRET: process.env.CLIENT_SECRET,
     FRONTEND_URL: process.env.FRONTEND_URL,
     BACKEND_URL: process.env.BACKEND_URL,
+    OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
 }
 
