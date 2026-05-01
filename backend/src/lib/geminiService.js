@@ -1,21 +1,77 @@
-import dotenv from "dotenv";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { ENV } from "./env.js";
+import OpenAI from "openai";
 
-dotenv.config();
-
-if (!process.env.GEMINI_API_KEY) {
-  console.error("FATAL ERROR: GEMINI_API_KEY is missing");
+if (!ENV.OPENROUTER_API_KEY) {
+  console.error("FATAL ERROR: OPENROUTER_API_KEY is missing");
   process.exit(1);
 }
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" }); 
 
-/* ===================== FLASHCARDS ===================== */
+const openai = new OpenAI({
+  baseURL: "https://openrouter.ai/api/v1",
+  apiKey: ENV.OPENROUTER_API_KEY,
+  defaultHeaders: {
+    "HTTP-Referer": ENV.BACKEND_URL,
+    "X-Title": "Lernify AI",
+  }
+});
+
+const FREE_MODELS = [
+  "openai/gpt-oss-120b:free",
+  "google/gemini-2.0-flash-lite-preview-02-05:free",
+  "meta-llama/llama-3.3-70b-instruct:free"
+];
+
+
+async function callOpenRouter(prompt) {
+  let lastError;
+
+  for (const modelName of FREE_MODELS) {
+    try {
+      console.log(`[AI] Attempting OpenRouter stream with model: "${modelName}"`);
+
+      const stream = await openai.chat.completions.create({
+        model: modelName,
+        messages: [{ role: "user", content: prompt }],
+        stream: true,
+      });
+
+      let fullResponse = "";
+
+      for await (const chunk of stream) {
+        const content = chunk.choices[0]?.delta?.content;
+        if (content) {
+          fullResponse += content;
+        }
+      }
+
+      if (fullResponse) {
+        console.log(`[AI] Successfully generated response using: ${modelName}`);
+        return fullResponse;
+      }
+
+    } catch (error) {
+      lastError = error;
+      const status = error.status || 500;
+
+      if ([429, 404, 528, 503].includes(status)) {
+        console.warn(`[AI] Model ${modelName} unavailable (Code: ${status}). Trying next...`);
+        continue;
+      }
+
+      console.error(`[AI] API Error on ${modelName}:`, error.message);
+      throw error;
+    }
+  }
+
+  console.error("[AI] Fatal Error: All free models failed or are rate-limited.");
+  throw new Error(`Failed to generate response: ${lastError?.message}`);
+}
 
 export async function generateFlashcards(text, count = 10) {
   const prompt = `
 Generate exactly ${count} educational flashcards from the text below.
+Do not include any conversational filler like "Here are your flashcards".
 
 Format each flashcard EXACTLY like this:
 Q: Question
@@ -24,20 +80,14 @@ D: easy | medium | hard
 
 Separate flashcards with ___
 
-Text:
-${text.slice(0, 15000)}
+Text: ${text.slice(0, 15000)}
 `;
 
-  const result = await model.generateContent(prompt);
-  const output = result.response.text() || "";
+  const output = await callOpenRouter(prompt);
 
-  if (!output) throw new Error("Empty Gemini response");
+  if (!output) throw new Error("Empty OpenRouter response");
 
-  const cards = output
-    .split("___")
-    .map((c) => c.trim())
-    .filter(Boolean);
-
+  const cards = output.split("___").map((c) => c.trim()).filter(Boolean);
   const flashcards = [];
 
   for (const card of cards) {
@@ -63,11 +113,10 @@ ${text.slice(0, 15000)}
   return flashcards.slice(0, count);
 }
 
-/* ===================== QUIZ ===================== */
-
 export async function generateQuiz(text, numQuestions = 5) {
   const prompt = `
 Generate exactly ${numQuestions} multiple-choice questions.
+Do not include any conversational filler.
 
 Format EXACTLY:
 Q: Question
@@ -81,14 +130,12 @@ D: easy | medium | hard
 
 Separate questions with ___
 
-Text:
-${text.slice(0, 15000)}
+Text: ${text.slice(0, 15000)}
 `;
 
-  const result = await model.generateContent(prompt);
-  const output = result.response.text() || "";
+  const output = await callOpenRouter(prompt);
 
-  if (!output) throw new Error("Empty Gemini response");
+  if (!output) throw new Error("Empty OpenRouter response");
 
   const blocks = output.split("___").map((b) => b.trim()).filter(Boolean);
   const questions = [];
@@ -127,46 +174,32 @@ ${text.slice(0, 15000)}
   return questions.slice(0, numQuestions);
 }
 
-/* ===================== SUMMARY ===================== */
 
 export async function generateSummary(text) {
   const prompt = `
-Summarize the following text clearly and concisely.
-Use bullet points if helpful.
+Summarize the following text clearly and concisely. Use bullet points if helpful.
 
-Text:
-${text.slice(0, 20000)}
+Text: ${text.slice(0, 20000)}
 `;
 
-  const result = await model.generateContent(prompt);
-  const output = result.response.text() || "";
+  const output = await callOpenRouter(prompt, 0.5);
 
-  if (!output) throw new Error("Empty Gemini response");
+  if (!output) throw new Error("Empty OpenRouter response");
 
   return output.trim();
 }
 
-/* ===================== EXPLAIN CONCEPT ===================== */
-
 export const explainConcept = async (concept, context) => {
-  const prompt = `Explain the concept of "${concept}" based on the following context.
-Provide a clear, educational explanation that's easy to understand.
-Include examples if relevant.
+  const prompt = `Explain the concept of "${concept}" based on the following context. Provide a clear, educational explanation that's easy to understand. Include examples if relevant.
 
-Context:
-${context.substring(0, 10000)}`;
+Context: ${context.substring(0, 10000)}`;
 
   try {
-    const result = await model.generateContent(prompt);
-    const generatedText = result.response.text();
-    return generatedText;
+    return await callOpenRouter(prompt, 0.5);
   } catch (error) {
-    console.error("Gemini API error:", error);
     throw new Error("Failed to explain concept");
   }
 };
-
-/* ===================== CHAT WITH CONTEXT ===================== */
 
 export const chatWithContext = async (question, chunks) => {
   const context = chunks
@@ -175,22 +208,17 @@ export const chatWithContext = async (question, chunks) => {
 
   console.log("context_____", context);
 
-  const prompt = `Based on the following context from a document, Analyse the context and answer the user's question.
-If the answer is not in the context, say so.
+  const prompt = `Based on the following context from a document, analyse the context and answer the user's question. If the answer is not in the context, say so.
 
-Context:
-${context}
+Context: ${context}
 
 Question: ${question}
 
 Answer:`;
 
   try {
-    const result = await model.generateContent(prompt);
-    const generatedText = result.response.text();
-    return generatedText;
+    return await callOpenRouter(prompt, 0.5);
   } catch (error) {
-    console.error("Gemini API error:", error);
-    throw new Error("Failed to generate response");
+    throw new Error("Failed to generate chat response");
   }
 };
